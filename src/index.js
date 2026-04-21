@@ -4,10 +4,6 @@ const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const multer = require('multer');
-const csv = require('csv-parser');
-const { Readable } = require('stream');
-require("dotenv").config();
 
 dotenv.config();
 
@@ -98,22 +94,15 @@ const labTestSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// --- UPDATED MEDICINE SCHEMA with inventory fields ---
 const medicineSchema = new mongoose.Schema(
   {
-    name: { type: String, required: true },
-    mg: { type: String, default: '' },
-    formula: { type: String, default: '' },
-    quantity: { type: Number, default: 0 },
-    price: { type: Number, required: true },
-    threshold: { type: Number, default: 10 },
+    name: { type: String, unique: true },
+    price: Number,
     active: { type: Boolean, default: true },
     addedBy: String,
   },
   { timestamps: true }
 );
-medicineSchema.index({ name: 1 }, { unique: true });
-// ----------------------------------------------------
 
 const billSchema = new mongoose.Schema(
   {
@@ -124,6 +113,7 @@ const billSchema = new mongoose.Schema(
     patientCNIC: String,
     doctorName: String,
     doctorId: String,
+    // Old fields for backward compatibility
     doctorFee: Number,
     medicines: [{ name: String, price: Number, quantity: { type: Number, default: 1 } }],
     labTests: [{ name: String, price: Number }],
@@ -134,14 +124,23 @@ const billSchema = new mongoose.Schema(
     token: String,
     collectedBy: String,
     collectedAt: { type: Date, default: Date.now },
-    billType: String,
-    title: String,
-    services: [{ name: String, amount: Number }],
-    totalAmount: Number,
-    appointmentDetails: { date: String, time: String, day: String },
+    // New fields for enhanced bill structure
+    billType: String, // 'services' or 'appointment'
+    title: String, // 'Services Bill' or 'Appointment Bill'
+    services: [{ name: String, amount: Number }], // Generic services array
+    totalAmount: Number, // For new bill structure
+    appointmentDetails: {
+      date: String,
+      time: String,
+      day: String
+    },
     generatedBy: String,
     generatedAt: Date,
-    serviceDetails: { date: String, time: String, day: String },
+    serviceDetails: {
+      date: String,
+      time: String,
+      day: String,
+    },
   },
   { timestamps: true }
 );
@@ -317,64 +316,10 @@ app.post('/api/catalog/lab-tests', auth(['lab']), async (req, res) => {
   res.status(201).json(created);
 });
 
-app.post('/api/catalog/medicines', auth(['pharmacy', 'admin']), async (req, res) => {
-  const { name, mg, formula, quantity, price, threshold } = req.body;
-  const created = await Medicine.create({
-    name,
-    mg: mg || '',
-    formula: formula || '',
-    quantity: Number(quantity || 0),
-    price: Number(price || 0),
-    threshold: Number(threshold || 10),
-    addedBy: req.user.name,
-  });
+app.post('/api/catalog/medicines', auth(['pharmacy']), async (req, res) => {
+  const { name, price } = req.body;
+  const created = await Medicine.create({ name, price: Number(price || 0), addedBy: req.user.name });
   res.status(201).json(created);
-});
-
-// NEW: Stock update endpoint
-app.patch('/api/medicines/:id/stock', auth(['pharmacy', 'admin']), async (req, res) => {
-  const { quantity } = req.body;
-  if (quantity === undefined || typeof quantity !== 'number') {
-    return res.status(400).json({ message: 'Quantity is required and must be a number' });
-  }
-  const medicine = await Medicine.findById(req.params.id);
-  if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
-  medicine.quantity = quantity;
-  await medicine.save();
-  res.json(medicine);
-});
-
-// NEW: Bulk import medicines via CSV
-const upload = multer({ storage: multer.memoryStorage() });
-app.post('/api/medicines/bulk', auth(['pharmacy', 'admin']), upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
-  const results = [];
-  const bufferString = req.file.buffer.toString();
-  const stream = Readable.from(bufferString);
-  stream
-    .pipe(csv())
-    .on('data', (data) => results.push(data))
-    .on('end', async () => {
-      try {
-        const created = [];
-        for (const row of results) {
-          const medicine = new Medicine({
-            name: row.name,
-            mg: row.mg || '',
-            formula: row.formula || '',
-            quantity: Number(row.quantity) || 0,
-            price: Number(row.price),
-            threshold: Number(row.threshold) || 10,
-            addedBy: req.user.name,
-          });
-          await medicine.save();
-          created.push(medicine);
-        }
-        res.json({ message: `Added ${created.length} medicines`, medicines: created });
-      } catch (err) {
-        res.status(500).json({ message: err.message });
-      }
-    });
 });
 
 app.post('/api/doctors', auth(['admin']), async (req, res) => {
@@ -524,9 +469,11 @@ app.get('/api/cases/:id/timeline', auth(), async (req, res) => {
 
 app.post('/api/bills', auth(['receptionist', 'counter', 'admin', 'doctor']), async (req, res) => {
   const billData = req.body;
+  
   const caseDoc = await Case.findById(billData.caseId);
   if (!caseDoc) return res.status(404).json({ message: 'Case not found' });
   
+  // Handle new bill structure (services array, billType, etc.)
   if (billData.services && billData.billType) {
     const bill = new Bill({
       caseId: billData.caseId,
@@ -544,17 +491,24 @@ app.post('/api/bills', auth(['receptionist', 'counter', 'admin', 'doctor']), asy
       generatedBy: billData.generatedBy || req.user.name,
       generatedAt: billData.generatedAt || new Date(),
     });
+    
     await bill.save();
     res.json(bill);
     return;
   }
   
+  // Handle old bill structure (backward compatibility)
   const { caseId, doctorFee = 0, medicines, labTests, extraLabCharges, extraPharmacyCharges, token } = req.body;
+  
+  // Only include doctorFee if it's greater than 0 (to avoid charging twice)
   const finalDoctorFee = Number(doctorFee) > 0 ? Number(doctorFee) : 0;
+  
   const subtotal = finalDoctorFee + 
     (medicines?.reduce((sum, m) => sum + (m.price * (m.quantity || 1)), 0) || 0) + 
     (labTests?.reduce((sum, t) => sum + t.price, 0) || 0);
+  
   const total = subtotal + (extraLabCharges || 0) + (extraPharmacyCharges || 0);
+  
   const bill = new Bill({
     caseId,
     patientName: caseDoc.patientName,
@@ -572,6 +526,7 @@ app.post('/api/bills', auth(['receptionist', 'counter', 'admin', 'doctor']), asy
     token,
     collectedBy: req.user.name,
   });
+  
   await bill.save();
   res.json(bill);
 });
