@@ -19,10 +19,13 @@ const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'super-refresh-secr
 app.use(cors());
 app.use(express.json());
 
+
 mongoose
   .connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/clinical_system')
   .then(() => console.log('MongoDB connected'))
   .catch((err) => console.error('MongoDB connection failed:', err.message));
+
+  
 
 const userSchema = new mongoose.Schema(
   {
