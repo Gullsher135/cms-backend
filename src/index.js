@@ -467,7 +467,7 @@ app.get('/api/cases/:id/timeline', auth(), async (req, res) => {
   res.json(caseDoc.timeline || []);
 });
 
-app.post('/api/bills', auth(['receptionist', 'counter', 'admin']), async (req, res) => {
+app.post('/api/bills', auth(['receptionist', 'counter', 'admin', 'doctor']), async (req, res) => {
   const billData = req.body;
   
   const caseDoc = await Case.findById(billData.caseId);
