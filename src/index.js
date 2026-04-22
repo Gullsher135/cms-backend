@@ -101,7 +101,6 @@ const labTestSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// --- UPDATED MEDICINE SCHEMA with inventory fields ---
 const medicineSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
