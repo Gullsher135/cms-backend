@@ -596,6 +596,39 @@ app.get('/api/bills', auth(), async (req, res) => {
   }
 });
 
+// Update medicine (except quantity)
+app.put('/api/medicines/:id', auth(['pharmacy', 'admin']), async (req, res) => {
+  const { name, mg, formula, price, threshold } = req.body;
+  const medicine = await Medicine.findById(req.params.id);
+  if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
+  
+  if (name) medicine.name = name;
+  if (mg !== undefined) medicine.mg = mg;
+  if (formula !== undefined) medicine.formula = formula;
+  if (price !== undefined) medicine.price = Number(price);
+  if (threshold !== undefined) medicine.threshold = Number(threshold);
+  
+  await medicine.save();
+  res.json(medicine);
+});
+
+// Delete medicine (only if not used in any prescription)
+app.delete('/api/medicines/:id', auth(['pharmacy', 'admin']), async (req, res) => {
+  const medicineId = req.params.id;
+  
+  // Check if this medicine is used in any case's prescriptions
+  const usedInCases = await Case.findOne({ 'prescriptions.id': medicineId });
+  if (usedInCases) {
+    return res.status(409).json({ 
+      message: 'Cannot delete: this medicine is used in existing prescriptions. Remove it from all patient records first.' 
+    });
+  }
+  
+  const medicine = await Medicine.findByIdAndDelete(medicineId);
+  if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
+  res.json({ message: 'Medicine deleted successfully' });
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
