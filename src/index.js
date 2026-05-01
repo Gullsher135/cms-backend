@@ -412,6 +412,7 @@ app.patch('/api/doctors/:id', auth(['admin']), async (req, res) => {
 });
 
 app.delete('/api/doctors/:id', auth(['admin']), async (req, res) => {
+  console.log('Decoded user:', payload);
   const targetId = req.params.id;
   await User.findByIdAndDelete(targetId);
   res.json({ ok: true });
