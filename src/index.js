@@ -148,28 +148,6 @@ const billSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const patientReportSchema = new mongoose.Schema(
-  {
-    patientName: { type: String, required: true },
-    phone: { type: String, required: true },
-    cnic: { type: String },
-    age: String,
-    gender: { type: String, enum: ['Male', 'Female', 'Other'], default: 'Male' },
-    doctorId: { type: String, required: true },
-    doctorName: { type: String, required: true },
-    diagnosis: { type: String, required: true },
-    prescriptions: [{ id: String, name: String, price: Number, quantity: Number }],
-    recommendedTests: [{ id: String, name: String, price: Number }],
-    reportDate: { type: Date, default: Date.now },
-    notes: String,
-  },
-  { timestamps: true }
-);
-patientReportSchema.index({ phone: 1, reportDate: -1 });
-patientReportSchema.index({ cnic: 1, reportDate: -1 });
-
-const PatientReport = mongoose.model('PatientReport', patientReportSchema);
-
 const User = mongoose.model('User', userSchema);
 const DoctorRequest = mongoose.model('DoctorRequest', doctorRequestSchema);
 const Case = mongoose.model('Case', caseSchema);
@@ -335,7 +313,7 @@ app.get('/api/catalog/medicines', auth(), async (_req, res) => {
   res.json(medicines);
 });
 
-app.post('/api/catalog/lab-tests', auth(['lab' , 'admin']), async (req, res) => {
+app.post('/api/catalog/lab-tests', auth(['lab']), async (req, res) => {
   const { name, price } = req.body;
   const created = await LabTest.create({ name, price: Number(price || 0), addedBy: req.user.name });
   res.status(201).json(created);
@@ -477,7 +455,7 @@ app.get('/api/cases', auth(), async (req, res) => {
   });
 });
 
-app.post('/api/cases', auth(['receptionist', 'admin']), async (req, res) => {
+app.post('/api/cases', auth(['receptionist', 'counter']), async (req, res) => {
   const conflict = await Appointment.findOne({
     doctorId: req.body.doctorId,
     date: req.body.appointmentDate,
@@ -648,38 +626,6 @@ app.delete('/api/medicines/:id', auth(['pharmacy', 'admin']), async (req, res) =
   const medicine = await Medicine.findByIdAndDelete(medicineId);
   if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
   res.json({ message: 'Medicine deleted successfully' });
-});
-
-// Get all reports for a patient (by phone or CNIC)
-app.get('/api/patient-reports', auth(['doctor', 'admin']), async (req, res) => {
-  const { phone, cnic, patientId } = req.query;
-  const query = {};
-  if (phone) query.phone = phone;
-  else if (cnic) query.cnic = cnic;
-  else if (patientId) query.patientId = patientId;
-  else return res.status(400).json({ message: 'Provide phone, CNIC, or patientId' });
-  
-  const reports = await PatientReport.find(query).sort({ reportDate: -1 });
-  res.json(reports);
-});
-
-// Create a new patient report
-app.post('/api/patient-reports', auth(['doctor']), async (req, res) => {
-  const reportData = req.body;
-  // Ensure doctor matches logged in user
-  if (reportData.doctorId !== req.user.id) {
-    return res.status(403).json({ message: 'Doctor ID mismatch' });
-  }
-  const report = new PatientReport(reportData);
-  await report.save();
-  res.status(201).json(report);
-});
-
-// Get a single report by ID
-app.get('/api/patient-reports/:id', auth(['doctor', 'admin']), async (req, res) => {
-  const report = await PatientReport.findById(req.params.id);
-  if (!report) return res.status(404).json({ message: 'Report not found' });
-  res.json(report);
 });
 
 app.listen(PORT, () => {
