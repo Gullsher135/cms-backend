@@ -412,10 +412,39 @@ app.patch('/api/doctors/:id', auth(['admin']), async (req, res) => {
 });
 
 app.delete('/api/doctors/:id', auth(['admin']), async (req, res) => {
-  console.log('Decoded user:', payload);
-  const targetId = req.params.id;
-  await User.findByIdAndDelete(targetId);
-  res.json({ ok: true });
+  const doctorId = req.params.id;
+
+  try {
+    // 1. Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(doctorId)) {
+      return res.status(400).json({ message: 'Invalid doctor ID format' });
+    }
+
+    // 2. Find the doctor
+    const doctor = await User.findById(doctorId);
+    if (!doctor || doctor.role !== 'doctor') {
+      return res.status(404).json({ message: 'Doctor not found' });
+    }
+
+    // 3. Check if doctor has any cases or appointments
+    const hasCases = await Case.exists({ doctorId: doctorId });
+    const hasAppointments = await Appointment.exists({ doctorId: doctorId });
+    const hasBills = await Bill.exists({ doctorId: doctorId });
+
+    if (hasCases || hasAppointments || hasBills) {
+      return res.status(400).json({
+        message: 'Cannot delete doctor: they have existing cases, appointments, or bills. Reassign or archive them first.'
+      });
+    }
+
+    // 4. Delete the doctor
+    await User.findByIdAndDelete(doctorId);
+    res.status(200).json({ message: 'Doctor deleted successfully' });
+
+  } catch (error) {
+    console.error('Delete doctor error:', error);
+    res.status(500).json({ message: 'Internal server error: ' + error.message });
+  }
 });
 
 app.put('/api/doctors/:id/availability', auth(['admin', 'doctor']), async (req, res) => {
