@@ -7,26 +7,38 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const csv = require('csv-parser');
 const { Readable } = require('stream');
-require("dotenv").config();
+const http = require('http');
+const { Server } = require('socket.io');
 
+require("dotenv").config();
 dotenv.config();
 
 const app = express();
+const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'super-refresh-secret-key';
 
+// Socket.io setup (if used)
+const io = new Server(server, {
+  cors: { origin: "*", methods: ["GET", "POST"] }
+});
+app.set('io', io);
+
+io.on('connection', (socket) => {
+  console.log('New client connected:', socket.id);
+  socket.on('disconnect', () => console.log('Client disconnected:', socket.id));
+});
+
 app.use(cors());
 app.use(express.json());
-
 
 mongoose
   .connect(process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/clinical_system')
   .then(() => console.log('MongoDB connected'))
   .catch((err) => console.error('MongoDB connection failed:', err.message));
 
-  
-
+// ======================= SCHEMAS =======================
 const userSchema = new mongoose.Schema(
   {
     name: String,
@@ -59,7 +71,7 @@ const caseSchema = new mongoose.Schema(
     phone: String,
     cnic: String,
     doctorId: String,
-    patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient' },
+    patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient' }, // ✅ added
     doctorName: String,
     appointmentDate: String,
     appointmentTime: String,
@@ -116,7 +128,6 @@ const medicineSchema = new mongoose.Schema(
   { timestamps: true }
 );
 medicineSchema.index({ name: 1 }, { unique: true });
-// ----------------------------------------------------
 
 const billSchema = new mongoose.Schema(
   {
@@ -148,8 +159,8 @@ const billSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-// Patient Master Index
-// Patient Master Index (add after other schemas)
+
+// ✅ Patient Master Index (only once)
 const patientSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
@@ -159,8 +170,6 @@ const patientSchema = new mongoose.Schema(
     gender: { type: String, enum: ['Male', 'Female', 'Other'] },
     address: String,
     emergencyContact: String,
-    createdAt: { type: Date, default: Date.now },
-    updatedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
 );
@@ -168,11 +177,8 @@ patientSchema.index({ phone: 1 });
 patientSchema.index({ cnic: 1 });
 
 const Patient = mongoose.model('Patient', patientSchema);
-patientSchema.index({ phone: 1 });
-patientSchema.index({ cnic: 1 });
 
-const Patient = mongoose.model('Patient', patientSchema);
-
+// Models
 const User = mongoose.model('User', userSchema);
 const DoctorRequest = mongoose.model('DoctorRequest', doctorRequestSchema);
 const Case = mongoose.model('Case', caseSchema);
@@ -181,6 +187,7 @@ const LabTest = mongoose.model('LabTest', labTestSchema);
 const Medicine = mongoose.model('Medicine', medicineSchema);
 const Bill = mongoose.model('Bill', billSchema);
 
+// ======================= INITIAL DATA =======================
 const baseUsers = [
   { name: 'System Admin', username: 'admin', password: 'admin123', role: 'admin' },
   { name: 'Receptionist', username: 'reception', password: 'reception123', role: 'receptionist' },
@@ -200,6 +207,7 @@ async function ensureBaseUsers() {
 }
 ensureBaseUsers();
 
+// ======================= HELPERS =======================
 function auth(requiredRoles = []) {
   return (req, res, next) => {
     const token = req.headers.authorization?.replace('Bearer ', '');
@@ -239,10 +247,12 @@ function addTimelineEntry(caseDoc, actor, action, note = '') {
   });
 }
 
+// ======================= ROUTES =======================
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', service: 'Clinic Management API', timestamp: new Date().toISOString() });
 });
 
+// Auth
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
   const user = await User.findOne({ username });
@@ -284,6 +294,7 @@ app.post('/api/auth/logout', auth(), async (req, res) => {
   res.json({ ok: true });
 });
 
+// Doctor requests
 app.post('/api/auth/doctor-request', async (req, res) => {
   const { fullName, specialization, preferredUsername, password, consultFee } = req.body;
   const passwordHash = await bcrypt.hash(password, 10);
@@ -315,6 +326,8 @@ app.post('/api/admin/doctor-requests/:id/approve', auth(['admin']), async (req, 
     availability: [],
   });
   await DoctorRequest.findByIdAndDelete(req.params.id);
+  const io = req.app.get('io');
+  io.emit('doctor:created', { id: user._id.toString(), name: user.name, specialization: user.specialization, username: user.username });
   res.json({ id: user._id.toString(), name: user.name, specialization: user.specialization, username: user.username });
 });
 
@@ -323,85 +336,10 @@ app.delete('/api/admin/doctor-requests/:id', auth(['admin']), async (req, res) =
   res.json({ ok: true });
 });
 
+// Doctors
 app.get('/api/doctors', auth(), async (_req, res) => {
   const doctors = await User.find({ role: 'doctor' }).select('_id name specialization consultFee availability username');
   res.json(doctors);
-});
-
-app.get('/api/catalog/lab-tests', auth(), async (_req, res) => {
-  const tests = await LabTest.find({ active: true }).sort({ name: 1 });
-  res.json(tests);
-});
-
-app.get('/api/catalog/medicines', auth(), async (_req, res) => {
-  const medicines = await Medicine.find({ active: true }).sort({ name: 1 });
-  res.json(medicines);
-});
-
-app.post('/api/catalog/lab-tests', auth(['lab']), async (req, res) => {
-  const { name, price } = req.body;
-  const created = await LabTest.create({ name, price: Number(price || 0), addedBy: req.user.name });
-  res.status(201).json(created);
-});
-
-app.post('/api/catalog/medicines', auth(['pharmacy', 'admin']), async (req, res) => {
-  const { name, mg, formula, quantity, price, threshold } = req.body;
-  const created = await Medicine.create({
-    name,
-    mg: mg || '',
-    formula: formula || '',
-    quantity: Number(quantity || 0),
-    price: Number(price || 0),
-    threshold: Number(threshold || 10),
-    addedBy: req.user.name,
-  });
-  res.status(201).json(created);
-});
-
-// NEW: Stock update endpoint
-app.patch('/api/medicines/:id/stock', auth(['pharmacy', 'admin']), async (req, res) => {
-  const { quantity } = req.body;
-  if (quantity === undefined || typeof quantity !== 'number') {
-    return res.status(400).json({ message: 'Quantity is required and must be a number' });
-  }
-  const medicine = await Medicine.findById(req.params.id);
-  if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
-  medicine.quantity = quantity;
-  await medicine.save();
-  res.json(medicine);
-});
-
-// NEW: Bulk import medicines via CSV
-const upload = multer({ storage: multer.memoryStorage() });
-app.post('/api/medicines/bulk', auth(['pharmacy', 'admin']), upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
-  const results = [];
-  const bufferString = req.file.buffer.toString();
-  const stream = Readable.from(bufferString);
-  stream
-    .pipe(csv())
-    .on('data', (data) => results.push(data))
-    .on('end', async () => {
-      try {
-        const created = [];
-        for (const row of results) {
-          const medicine = new Medicine({
-            name: row.name,
-            mg: row.mg || '',
-            formula: row.formula || '',
-            quantity: Number(row.quantity) || 0,
-            price: Number(row.price),
-            threshold: Number(row.threshold) || 10,
-            addedBy: req.user.name,
-          });
-          await medicine.save();
-          created.push(medicine);
-        }
-        res.json({ message: `Added ${created.length} medicines`, medicines: created });
-      } catch (err) {
-        res.status(500).json({ message: err.message });
-      }
-    });
 });
 
 app.post('/api/doctors', auth(['admin']), async (req, res) => {
@@ -416,56 +354,39 @@ app.post('/api/doctors', auth(['admin']), async (req, res) => {
     consultFee: Number(consultFee || 2000),
     availability: [],
   });
+  const io = req.app.get('io');
+  io.emit('doctor:created', { id: doctor._id.toString(), name: doctor.name, specialization: doctor.specialization, username: doctor.username, consultFee: doctor.consultFee });
   res.status(201).json(doctor);
 });
 
 app.patch('/api/doctors/:id', auth(['admin']), async (req, res) => {
   const targetId = req.params.id;
   const { name, specialization, username, consultFee, password } = req.body;
-  const updatePayload = {
-    name,
-    specialization,
-    username,
-    consultFee: Number(consultFee || 2000),
-  };
-  if (password) {
-    updatePayload.passwordHash = await bcrypt.hash(password, 10);
-  }
+  const updatePayload = { name, specialization, username, consultFee: Number(consultFee || 2000) };
+  if (password) updatePayload.passwordHash = await bcrypt.hash(password, 10);
   const doctor = await User.findByIdAndUpdate(targetId, updatePayload, { new: true });
   if (!doctor) return res.status(404).json({ message: 'Doctor not found' });
+  const io = req.app.get('io');
+  io.emit('doctor:updated', { id: doctor._id.toString(), name: doctor.name, specialization: doctor.specialization, username: doctor.username, consultFee: doctor.consultFee });
   res.json(doctor);
 });
 
 app.delete('/api/doctors/:id', auth(['admin']), async (req, res) => {
   const doctorId = req.params.id;
-
   try {
-    // 1. Validate ObjectId
-    if (!mongoose.Types.ObjectId.isValid(doctorId)) {
-      return res.status(400).json({ message: 'Invalid doctor ID format' });
-    }
-
-    // 2. Find the doctor
+    if (!mongoose.Types.ObjectId.isValid(doctorId)) return res.status(400).json({ message: 'Invalid doctor ID format' });
     const doctor = await User.findById(doctorId);
-    if (!doctor || doctor.role !== 'doctor') {
-      return res.status(404).json({ message: 'Doctor not found' });
-    }
-
-    // 3. Check if doctor has any cases or appointments
-    const hasCases = await Case.exists({ doctorId: doctorId });
-    const hasAppointments = await Appointment.exists({ doctorId: doctorId });
-    const hasBills = await Bill.exists({ doctorId: doctorId });
-
+    if (!doctor || doctor.role !== 'doctor') return res.status(404).json({ message: 'Doctor not found' });
+    const hasCases = await Case.exists({ doctorId });
+    const hasAppointments = await Appointment.exists({ doctorId });
+    const hasBills = await Bill.exists({ doctorId });
     if (hasCases || hasAppointments || hasBills) {
-      return res.status(400).json({
-        message: 'Cannot delete doctor: they have existing cases, appointments, or bills. Reassign or archive them first.'
-      });
+      return res.status(400).json({ message: 'Cannot delete doctor: they have existing cases, appointments, or bills. Reassign or archive them first.' });
     }
-
-    // 4. Delete the doctor
     await User.findByIdAndDelete(doctorId);
+    const io = req.app.get('io');
+    io.emit('doctor:deleted', { id: doctorId });
     res.status(200).json({ message: 'Doctor deleted successfully' });
-
   } catch (error) {
     console.error('Delete doctor error:', error);
     res.status(500).json({ message: 'Internal server error: ' + error.message });
@@ -474,40 +395,133 @@ app.delete('/api/doctors/:id', auth(['admin']), async (req, res) => {
 
 app.put('/api/doctors/:id/availability', auth(['admin', 'doctor']), async (req, res) => {
   const targetId = req.params.id;
-  if (req.user.role === 'doctor' && req.user.id !== targetId) {
-    return res.status(403).json({ message: 'Forbidden' });
-  }
+  if (req.user.role === 'doctor' && req.user.id !== targetId) return res.status(403).json({ message: 'Forbidden' });
   const { availability } = req.body;
   const doctor = await User.findByIdAndUpdate(targetId, { availability }, { new: true });
   res.json(doctor);
 });
 
+// Lab tests catalog
+app.get('/api/catalog/lab-tests', auth(), async (_req, res) => {
+  const tests = await LabTest.find({ active: true }).sort({ name: 1 });
+  res.json(tests);
+});
+
+app.post('/api/catalog/lab-tests', auth(['lab']), async (req, res) => {
+  const { name, price } = req.body;
+  const created = await LabTest.create({ name, price: Number(price || 0), addedBy: req.user.name });
+  const io = req.app.get('io');
+  io.emit('labtest:created', created);
+  res.status(201).json(created);
+});
+
+// Medicines catalog
+app.get('/api/catalog/medicines', auth(), async (_req, res) => {
+  const medicines = await Medicine.find({ active: true }).sort({ name: 1 });
+  res.json(medicines);
+});
+
+app.post('/api/catalog/medicines', auth(['pharmacy', 'admin']), async (req, res) => {
+  const { name, mg, formula, quantity, price, threshold } = req.body;
+  const created = await Medicine.create({
+    name, mg: mg || '', formula: formula || '',
+    quantity: Number(quantity || 0), price: Number(price || 0),
+    threshold: Number(threshold || 10), addedBy: req.user.name,
+  });
+  const io = req.app.get('io');
+  io.emit('medicine:created', created);
+  res.status(201).json(created);
+});
+
+app.patch('/api/medicines/:id/stock', auth(['pharmacy', 'admin']), async (req, res) => {
+  const { quantity } = req.body;
+  if (quantity === undefined || typeof quantity !== 'number') return res.status(400).json({ message: 'Quantity is required and must be a number' });
+  const medicine = await Medicine.findById(req.params.id);
+  if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
+  medicine.quantity = quantity;
+  await medicine.save();
+  const io = req.app.get('io');
+  io.emit('medicine:updated', medicine);
+  res.json(medicine);
+});
+
+app.put('/api/medicines/:id', auth(['pharmacy', 'admin']), async (req, res) => {
+  const { name, mg, formula, price, threshold } = req.body;
+  const medicine = await Medicine.findById(req.params.id);
+  if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
+  if (name) medicine.name = name;
+  if (mg !== undefined) medicine.mg = mg;
+  if (formula !== undefined) medicine.formula = formula;
+  if (price !== undefined) medicine.price = Number(price);
+  if (threshold !== undefined) medicine.threshold = Number(threshold);
+  await medicine.save();
+  const io = req.app.get('io');
+  io.emit('medicine:updated', medicine);
+  res.json(medicine);
+});
+
+app.delete('/api/medicines/:id', auth(['pharmacy', 'admin']), async (req, res) => {
+  const medicineId = req.params.id;
+  const usedInCases = await Case.findOne({ 'prescriptions.id': medicineId });
+  if (usedInCases) return res.status(409).json({ message: 'Cannot delete: this medicine is used in existing prescriptions. Remove it from all patient records first.' });
+  const medicine = await Medicine.findByIdAndDelete(medicineId);
+  if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
+  const io = req.app.get('io');
+  io.emit('medicine:deleted', { id: medicineId });
+  res.json({ message: 'Medicine deleted successfully' });
+});
+
+// Bulk import medicines CSV
+const upload = multer({ storage: multer.memoryStorage() });
+app.post('/api/medicines/bulk', auth(['pharmacy', 'admin']), upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+  const results = [];
+  const bufferString = req.file.buffer.toString();
+  const stream = Readable.from(bufferString);
+  stream
+    .pipe(csv())
+    .on('data', (data) => results.push(data))
+    .on('end', async () => {
+      try {
+        const created = [];
+        for (const row of results) {
+          const medicine = new Medicine({
+            name: row.name, mg: row.mg || '', formula: row.formula || '',
+            quantity: Number(row.quantity) || 0, price: Number(row.price),
+            threshold: Number(row.threshold) || 10, addedBy: req.user.name,
+          });
+          await medicine.save();
+          created.push(medicine);
+        }
+        const io = req.app.get('io');
+        created.forEach(med => io.emit('medicine:created', med));
+        res.json({ message: `Added ${created.length} medicines`, medicines: created });
+      } catch (err) {
+        res.status(500).json({ message: err.message });
+      }
+    });
+});
+
+// Cases
 app.get('/api/cases', auth(), async (req, res) => {
   const { doctorId, day, page = 1, limit = 20, search = '', sortBy = 'createdAt', order = 'desc' } = req.query;
   const query = {};
   if (req.user.role === 'doctor') query.doctorId = req.user.id;
   if (doctorId) query.doctorId = doctorId;
   if (day) query.appointmentDate = day;
-  if (search) {
-    query.$or = [
-      { patientName: { $regex: search, $options: 'i' } },
-      { phone: { $regex: search, $options: 'i' } },
-      { cnic: { $regex: search, $options: 'i' } },
-      { doctorName: { $regex: search, $options: 'i' } },
-    ];
-  }
+  if (search) query.$or = [
+    { patientName: { $regex: search, $options: 'i' } },
+    { phone: { $regex: search, $options: 'i' } },
+    { cnic: { $regex: search, $options: 'i' } },
+    { doctorName: { $regex: search, $options: 'i' } },
+  ];
   const sortDirection = order === 'asc' ? 1 : -1;
   const skip = (Number(page) - 1) * Number(limit);
   const [data, total] = await Promise.all([
     Case.find(query).sort({ [sortBy]: sortDirection }).skip(skip).limit(Number(limit)),
     Case.countDocuments(query),
   ]);
-  res.json({
-    data,
-    total,
-    page: Number(page),
-    totalPages: Math.ceil(total / Number(limit)),
-  });
+  res.json({ data, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) });
 });
 
 app.post('/api/cases', auth(['receptionist', 'counter']), async (req, res) => {
@@ -517,9 +531,7 @@ app.post('/api/cases', auth(['receptionist', 'counter']), async (req, res) => {
     time: req.body.appointmentTime,
     status: { $ne: 'cancelled' },
   });
-  if (conflict) {
-    return res.status(409).json({ message: 'Selected doctor slot is already booked' });
-  }
+  if (conflict) return res.status(409).json({ message: 'Selected doctor slot is already booked' });
 
   // Find or create patient master record
   let patient = await Patient.findOne({ phone: req.body.phone });
@@ -532,7 +544,6 @@ app.post('/api/cases', auth(['receptionist', 'counter']), async (req, res) => {
     });
     await patient.save();
   } else {
-    // Update patient details if changed
     patient.name = req.body.patientName;
     patient.age = req.body.age;
     if (req.body.cnic) patient.cnic = req.body.cnic;
@@ -563,12 +574,33 @@ app.post('/api/cases', auth(['receptionist', 'counter']), async (req, res) => {
   });
   caseData.appointmentId = appointment._id.toString();
   await caseData.save();
-
   const io = req.app.get('io');
   io.emit('case:created', caseData);
   res.status(201).json(caseData);
 });
 
+app.patch('/api/cases/:id', auth(), async (req, res) => {
+  const caseDoc = await Case.findById(req.params.id);
+  if (!caseDoc) return res.status(404).json({ message: 'Case not found' });
+  if (req.user.role === 'doctor' && caseDoc.doctorId !== req.user.id) return res.status(403).json({ message: 'Forbidden' });
+  Object.assign(caseDoc, req.body);
+  addTimelineEntry(caseDoc, req.user, req.body.timelineAction || 'Case updated', req.body.timelineNote || '');
+  const labDone = caseDoc.labStatus === 'done' || caseDoc.labStatus === 'not_required';
+  const pharmDone = caseDoc.pharmacyStatus === 'done' || caseDoc.pharmacyStatus === 'not_required';
+  if (caseDoc.billingPaid && labDone && pharmDone) caseDoc.status = 'closed';
+  await caseDoc.save();
+  const io = req.app.get('io');
+  io.emit('case:updated', caseDoc);
+  res.json(caseDoc);
+});
+
+app.get('/api/cases/:id/timeline', auth(), async (req, res) => {
+  const caseDoc = await Case.findById(req.params.id).select('timeline');
+  if (!caseDoc) return res.status(404).json({ message: 'Case not found' });
+  res.json(caseDoc.timeline || []);
+});
+
+// Appointments
 app.get('/api/appointments', auth(), async (req, res) => {
   const { doctorId, day } = req.query;
   const query = {};
@@ -579,34 +611,14 @@ app.get('/api/appointments', auth(), async (req, res) => {
   res.json(items);
 });
 
-app.patch('/api/cases/:id', auth(), async (req, res) => {
-  const caseDoc = await Case.findById(req.params.id);
-  if (!caseDoc) return res.status(404).json({ message: 'Case not found' });
-  if (req.user.role === 'doctor' && caseDoc.doctorId !== req.user.id) {
-    return res.status(403).json({ message: 'Forbidden' });
-  }
-  Object.assign(caseDoc, req.body);
-  addTimelineEntry(caseDoc, req.user, req.body.timelineAction || 'Case updated', req.body.timelineNote || '');
-  const labDone = caseDoc.labStatus === 'done' || caseDoc.labStatus === 'not_required';
-  const pharmDone = caseDoc.pharmacyStatus === 'done' || caseDoc.pharmacyStatus === 'not_required';
-  if (caseDoc.billingPaid && labDone && pharmDone) caseDoc.status = 'closed';
-  await caseDoc.save();
-  res.json(caseDoc);
-});
-
-app.get('/api/cases/:id/timeline', auth(), async (req, res) => {
-  const caseDoc = await Case.findById(req.params.id).select('timeline');
-  if (!caseDoc) return res.status(404).json({ message: 'Case not found' });
-  res.json(caseDoc.timeline || []);
-});
-
+// Bills
 app.post('/api/bills', auth(['receptionist', 'counter', 'admin', 'doctor']), async (req, res) => {
   const billData = req.body;
   const caseDoc = await Case.findById(billData.caseId);
   if (!caseDoc) return res.status(404).json({ message: 'Case not found' });
-  
+  let bill;
   if (billData.services && billData.billType) {
-    const bill = new Bill({
+    bill = new Bill({
       caseId: billData.caseId,
       patientName: billData.patientName || caseDoc.patientName,
       patientAge: caseDoc.age,
@@ -622,35 +634,34 @@ app.post('/api/bills', auth(['receptionist', 'counter', 'admin', 'doctor']), asy
       generatedBy: billData.generatedBy || req.user.name,
       generatedAt: billData.generatedAt || new Date(),
     });
-    await bill.save();
-    res.json(bill);
-    return;
+  } else {
+    const { caseId, doctorFee = 0, medicines, labTests, extraLabCharges, extraPharmacyCharges, token } = req.body;
+    const finalDoctorFee = Number(doctorFee) > 0 ? Number(doctorFee) : 0;
+    const subtotal = finalDoctorFee +
+      (medicines?.reduce((sum, m) => sum + (m.price * (m.quantity || 1)), 0) || 0) +
+      (labTests?.reduce((sum, t) => sum + t.price, 0) || 0);
+    const total = subtotal + (extraLabCharges || 0) + (extraPharmacyCharges || 0);
+    bill = new Bill({
+      caseId,
+      patientName: caseDoc.patientName,
+      patientAge: caseDoc.age,
+      patientPhone: caseDoc.phone,
+      patientCNIC: caseDoc.cnic,
+      doctorName: caseDoc.doctorName,
+      doctorFee: finalDoctorFee,
+      medicines: medicines || [],
+      labTests: labTests || [],
+      extraLabCharges: extraLabCharges || 0,
+      extraPharmacyCharges: extraPharmacyCharges || 0,
+      subtotal,
+      total,
+      token,
+      collectedBy: req.user.name,
+    });
   }
-  
-  const { caseId, doctorFee = 0, medicines, labTests, extraLabCharges, extraPharmacyCharges, token } = req.body;
-  const finalDoctorFee = Number(doctorFee) > 0 ? Number(doctorFee) : 0;
-  const subtotal = finalDoctorFee + 
-    (medicines?.reduce((sum, m) => sum + (m.price * (m.quantity || 1)), 0) || 0) + 
-    (labTests?.reduce((sum, t) => sum + t.price, 0) || 0);
-  const total = subtotal + (extraLabCharges || 0) + (extraPharmacyCharges || 0);
-  const bill = new Bill({
-    caseId,
-    patientName: caseDoc.patientName,
-    patientAge: caseDoc.age,
-    patientPhone: caseDoc.phone,
-    patientCNIC: caseDoc.cnic,
-    doctorName: caseDoc.doctorName,
-    doctorFee: finalDoctorFee,
-    medicines: medicines || [],
-    labTests: labTests || [],
-    extraLabCharges: extraLabCharges || 0,
-    extraPharmacyCharges: extraPharmacyCharges || 0,
-    subtotal,
-    total,
-    token,
-    collectedBy: req.user.name,
-  });
   await bill.save();
+  const io = req.app.get('io');
+  io.emit('bill:created', bill);
   res.json(bill);
 });
 
@@ -671,48 +682,44 @@ app.get('/api/bills', auth(), async (req, res) => {
   }
 });
 
-// Update medicine (except quantity)
-app.put('/api/medicines/:id', auth(['pharmacy', 'admin']), async (req, res) => {
-  const { name, mg, formula, price, threshold } = req.body;
-  const medicine = await Medicine.findById(req.params.id);
-  if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
-  
-  if (name) medicine.name = name;
-  if (mg !== undefined) medicine.mg = mg;
-  if (formula !== undefined) medicine.formula = formula;
-  if (price !== undefined) medicine.price = Number(price);
-  if (threshold !== undefined) medicine.threshold = Number(threshold);
-  
-  await medicine.save();
-  res.json(medicine);
+// Patient Report (existing)
+app.get('/api/patient-reports', auth(['doctor', 'admin']), async (req, res) => {
+  const { phone, cnic, patientId } = req.query;
+  const query = {};
+  if (phone) query.phone = phone;
+  else if (cnic) query.cnic = cnic;
+  else if (patientId) query.patientId = patientId;
+  else return res.status(400).json({ message: 'Provide phone, CNIC, or patientId' });
+  const reports = await PatientReport.find(query).sort({ reportDate: -1 });
+  res.json(reports);
 });
 
-// Delete medicine (only if not used in any prescription)
-app.delete('/api/medicines/:id', auth(['pharmacy', 'admin']), async (req, res) => {
-  const medicineId = req.params.id;
-  
-  // Check if this medicine is used in any case's prescriptions
-  const usedInCases = await Case.findOne({ 'prescriptions.id': medicineId });
-  if (usedInCases) {
-    return res.status(409).json({ 
-      message: 'Cannot delete: this medicine is used in existing prescriptions. Remove it from all patient records first.' 
-    });
-  }
-  
-  const medicine = await Medicine.findByIdAndDelete(medicineId);
-  if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
-  res.json({ message: 'Medicine deleted successfully' });
+app.post('/api/patient-reports', auth(['doctor']), async (req, res) => {
+  const reportData = req.body;
+  if (reportData.doctorId !== req.user.id) return res.status(403).json({ message: 'Doctor ID mismatch' });
+  const report = new PatientReport(reportData);
+  await report.save();
+  const io = req.app.get('io');
+  io.emit('patient-report:created', report);
+  res.status(201).json(report);
 });
 
-// GET /api/patients/:patientId/history
+app.get('/api/patient-reports/:id', auth(['doctor', 'admin']), async (req, res) => {
+  const report = await PatientReport.findById(req.params.id);
+  if (!report) return res.status(404).json({ message: 'Report not found' });
+  res.json(report);
+});
+
+// =============== PATIENT HISTORY & SEARCH ===============
 app.get('/api/patients/:patientId/history', auth(['doctor', 'admin', 'receptionist']), async (req, res) => {
   const { patientId } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(patientId)) return res.status(400).json({ message: 'Invalid patient ID' });
   const patient = await Patient.findById(patientId);
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
-  
   const cases = await Case.find({ patientId }).sort({ createdAt: -1 });
   res.json({ patient, cases });
 });
+
 app.get('/api/patients/search', auth(['receptionist', 'doctor', 'admin']), async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ message: 'Search query required' });
@@ -726,7 +733,34 @@ app.get('/api/patients/search', auth(['receptionist', 'doctor', 'admin']), async
   res.json(patients);
 });
 
+// =============== MIGRATION: backfill patientId for old cases (run once) ===============
+app.post('/api/migrate/backfill-patient-id', auth(['admin']), async (req, res) => {
+  try {
+    const cases = await Case.find({ patientId: { $exists: false } });
+    let updated = 0;
+    for (const c of cases) {
+      let patient = await Patient.findOne({ phone: c.phone });
+      if (!patient) {
+        patient = new Patient({
+          name: c.patientName,
+          age: c.age,
+          phone: c.phone,
+          cnic: c.cnic || '',
+        });
+        await patient.save();
+      }
+      c.patientId = patient._id;
+      await c.save();
+      updated++;
+    }
+    res.json({ message: `✅ Updated ${updated} cases with patientId` });
+  } catch (err) {
+    console.error('Migration error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-app.listen(PORT, () => {
+// Start server
+server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
