@@ -937,14 +937,18 @@ app.get('/api/patients/:patientId/history', auth(['doctor', 'admin', 'receptioni
 app.get('/api/patients/search', auth(['receptionist', 'doctor', 'admin']), async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ message: 'Search query required' });
-  const patients = await Patient.find({
-    $or: [
-      { name: { $regex: q, $options: 'i' } },
-      { phone: { $regex: q, $options: 'i' } },
-      { cnic: { $regex: q, $options: 'i' } },
-    ]
-  }).limit(20);
-  res.json(patients);
+  try {
+    const patients = await Patient.find({
+      $or: [
+        { name: { $regex: q, $options: 'i' } },
+        { phone: { $regex: q, $options: 'i' } },
+        { cnic: { $regex: q, $options: 'i' } },
+      ]
+    }).limit(20);
+    res.json(patients);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
 });
 
 // ======================= MIGRATION: backfill patientId for old cases =======================
