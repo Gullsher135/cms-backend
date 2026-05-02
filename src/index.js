@@ -951,6 +951,32 @@ app.get('/api/patients/search', auth(['receptionist', 'doctor', 'admin']), async
   }
 });
 
+// ======================= DELETE PATIENT (admin only) =======================
+app.delete('/api/patients/:id', auth(['admin']), async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ message: 'Invalid patient ID format' });
+  }
+
+  const patient = await Patient.findById(id);
+  if (!patient) {
+    return res.status(404).json({ message: 'Patient not found' });
+  }
+
+  // Check if patient has any linked cases
+  const linkedCases = await Case.find({ patientId: id });
+  if (linkedCases.length > 0) {
+    return res.status(400).json({
+      message: `Cannot delete patient: they have ${linkedCases.length} associated case(s). Delete or reassign cases first.`
+    });
+  }
+
+  await patient.deleteOne();
+  const io = req.app.get('io');
+  io.emit('patient:deleted', { id });
+  res.json({ message: 'Patient deleted successfully' });
+});
+
 // ======================= MIGRATION: backfill patientId for old cases =======================
 app.post('/api/migrate/backfill-patient-id', auth(['admin']), async (req, res) => {
   try {
