@@ -108,11 +108,37 @@ const labTestSchema = new mongoose.Schema(
   {
     name: { type: String, unique: true },
     price: Number,
+    unit: String,                 // e.g., "mg/dL", "mmol/L"
+    normalRangeMin: Number,       // for numeric tests
+    normalRangeMax: Number,
+    resultType: { type: String, enum: ['numeric', 'text', 'boolean', 'range'], default: 'numeric' },
+    method: String,               // e.g., "ELISA", "PCR"
     active: { type: Boolean, default: true },
     addedBy: String,
   },
   { timestamps: true }
 );
+
+const labResultSchema = new mongoose.Schema(
+  {
+    caseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Case', required: true },
+    testId: { type: mongoose.Schema.Types.ObjectId, ref: 'LabTest', required: true },
+    testName: String,
+    result: String,               // actual result (numeric, text, etc.)
+    flag: { type: String, enum: ['High', 'Low', 'Normal', 'Abnormal', 'Pending'], default: 'Pending' },
+    comment: String,
+    status: { type: String, enum: ['pending', 'collected', 'received', 'in_progress', 'completed', 'verified'], default: 'pending' },
+    sampleCollectedAt: Date,
+    sampleReceivedAt: Date,
+    reportedBy: String,
+    reportedAt: Date,
+    verifiedBy: String,
+    verifiedAt: Date,
+  },
+  { timestamps: true }
+);
+labResultSchema.index({ caseId: 1, testId: 1 });
+const LabResult = mongoose.model('LabResult', labResultSchema);
 
 const medicineSchema = new mongoose.Schema(
   {
@@ -1002,6 +1028,147 @@ app.post('/api/migrate/backfill-patient-id', auth(['admin']), async (req, res) =
     console.error('Migration error:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ======================= LIMS RESULT MANAGEMENT =======================
+// Get pending lab results for a lab user (cases needing results)
+app.get('/api/lab-results/pending', auth(['lab']), async (req, res) => {
+  // find cases where labStatus is 'pending' or 'in_progress'
+  const cases = await Case.find({ labStatus: { $in: ['pending', 'in_progress'] } })
+    .select('_id patientName doctorName recommendedTests');
+  const pendingResults = [];
+  for (const c of cases) {
+    for (const test of c.recommendedTests || []) {
+      const existing = await LabResult.findOne({ caseId: c._id, testId: test.id });
+      if (!existing || existing.status !== 'completed') {
+        pendingResults.push({
+          caseId: c._id,
+          patientName: c.patientName,
+          doctorName: c.doctorName,
+          testId: test.id,
+          testName: test.name,
+          price: test.price,
+          existingResult: existing
+        });
+      }
+    }
+  }
+  res.json(pendingResults);
+});
+
+// Enter or update lab result
+app.post('/api/lab-results', auth(['lab']), async (req, res) => {
+  const { caseId, testId, result, comment, status, sampleCollectedAt, sampleReceivedAt } = req.body;
+  
+  let labResult = await LabResult.findOne({ caseId, testId });
+  if (!labResult) {
+    const test = await LabTest.findById(testId);
+    if (!test) return res.status(404).json({ message: 'Test not found' });
+    labResult = new LabResult({
+      caseId,
+      testId,
+      testName: test.name,
+    });
+  }
+  
+  if (result !== undefined) labResult.result = result;
+  if (comment !== undefined) labResult.comment = comment;
+  if (status) labResult.status = status;
+  if (sampleCollectedAt) labResult.sampleCollectedAt = sampleCollectedAt;
+  if (sampleReceivedAt) labResult.sampleReceivedAt = sampleReceivedAt;
+  
+  if (status === 'in_progress') labResult.reportedAt = new Date();
+  if (status === 'completed') {
+    labResult.reportedAt = new Date();
+    labResult.reportedBy = req.user.name;
+    // auto-flag numeric results
+    const test = await LabTest.findById(testId);
+    if (test && test.resultType === 'numeric' && labResult.result) {
+      const num = parseFloat(labResult.result);
+      if (!isNaN(num)) {
+        if (test.normalRangeMin !== undefined && num < test.normalRangeMin) labResult.flag = 'Low';
+        else if (test.normalRangeMax !== undefined && num > test.normalRangeMax) labResult.flag = 'High';
+        else labResult.flag = 'Normal';
+      } else {
+        labResult.flag = 'Abnormal';
+      }
+    } else {
+      labResult.flag = 'Abnormal';
+    }
+  }
+  
+  await labResult.save();
+  
+  // Update case lab status if all tests completed
+  const caseDoc = await Case.findById(caseId);
+  const allTests = caseDoc.recommendedTests || [];
+  let allCompleted = true;
+  for (const t of allTests) {
+    const res = await LabResult.findOne({ caseId, testId: t.id });
+    if (!res || res.status !== 'completed') { allCompleted = false; break; }
+  }
+  if (allCompleted) {
+    caseDoc.labStatus = 'done';
+    await caseDoc.save();
+    const io = req.app.get('io');
+    io.emit('case:updated', caseDoc);
+  }
+  
+  res.json(labResult);
+});
+
+// Get lab history for a patient (by patientId)
+app.get('/api/lab-results/patient/:patientId', auth(['doctor', 'admin']), async (req, res) => {
+  const { patientId } = req.params;
+  const cases = await Case.find({ patientId }).select('_id createdAt');
+  const caseIds = cases.map(c => c._id);
+  const results = await LabResult.find({ caseId: { $in: caseIds } })
+    .populate('testId')
+    .sort({ createdAt: -1 });
+  // Group by test name and date
+  res.json(results);
+});
+
+// Print lab report (generate HTML)
+app.get('/api/lab-results/:resultId/print', auth(['lab', 'doctor']), async (req, res) => {
+  const result = await LabResult.findById(req.params.resultId).populate('caseId');
+  if (!result) return res.status(404).json({ message: 'Result not found' });
+  const patient = await Patient.findById(result.caseId.patientId);
+  const test = await LabTest.findById(result.testId);
+  const html = `<!DOCTYPE html>
+  <html>
+  <head><title>Lab Report</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .header { text-align: center; border-bottom: 2px solid #0f5ea8; margin-bottom: 20px; }
+    .clinic-name { font-size: 14px; color: #555; }
+    .section { margin-bottom: 15px; }
+    .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .result-table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    .result-table th, .result-table td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+    .result-table th { background: #f0f4f8; }
+    .footer { text-align: center; margin-top: 30px; font-size: 10px; color: #888; border-top: 1px solid #ccc; padding-top: 10px; }
+  </style>
+  </head>
+  <body>
+    <div class="header"><h2>Nexone Clinic</h2><div class="clinic-name">Laboratory Report</div></div>
+    <div class="section"><h3>Patient Information</h3><div class="info-grid">
+      <div><strong>Name:</strong> ${result.caseId.patientName}</div>
+      <div><strong>Age:</strong> ${result.caseId.age}</div>
+      <div><strong>Patient ID:</strong> ${patient?.cnic || '—'}</div>
+      <div><strong>Date:</strong> ${new Date(result.createdAt).toLocaleDateString()}</div>
+    </div></div>
+    <div class="section"><h3>Test Results</h3>
+      <table class="result-table"><thead><th>Test</th><th>Result</th><th>Reference Range</th><th>Flag</th></thead>
+      <tbody><td>${result.testName}</td><td>${result.result}</td>
+      <td>${test?.normalRangeMin} - ${test?.normalRangeMax} ${test?.unit || ''}</td>
+      <td>${result.flag}</td></tbody></table>
+    </div>
+    ${result.comment ? `<div class="section"><h3>Comment</h3><p>${result.comment}</p></div>` : ''}
+    <div class="footer">${SOFTWARE_BRANDING}</div>
+  </body>
+  </html>`;
+  res.send(html);
 });
 
 // ======================= START SERVER =======================
