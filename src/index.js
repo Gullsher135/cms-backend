@@ -933,6 +933,7 @@ app.get('/api/patients/:patientId/history', auth(['doctor', 'admin', 'receptioni
   res.json({ patient, cases });
 });
 
+// ======================= PATIENT SEARCH (for reception) =======================
 app.get('/api/patients/search', auth(['receptionist', 'doctor', 'admin']), async (req, res) => {
   const { q } = req.query;
   if (!q) return res.status(400).json({ message: 'Search query required' });
