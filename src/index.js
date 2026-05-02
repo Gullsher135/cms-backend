@@ -149,6 +149,7 @@ const billSchema = new mongoose.Schema(
   { timestamps: true }
 );
 // Patient Master Index
+// Patient Master Index (add after other schemas)
 const patientSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
@@ -158,13 +159,15 @@ const patientSchema = new mongoose.Schema(
     gender: { type: String, enum: ['Male', 'Female', 'Other'] },
     address: String,
     emergencyContact: String,
-    allergies: [{ type: String }],
-    medicalHistory: String, // free text or structured later
     createdAt: { type: Date, default: Date.now },
     updatedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
 );
+patientSchema.index({ phone: 1 });
+patientSchema.index({ cnic: 1 });
+
+const Patient = mongoose.model('Patient', patientSchema);
 patientSchema.index({ phone: 1 });
 patientSchema.index({ cnic: 1 });
 
@@ -529,7 +532,7 @@ app.post('/api/cases', auth(['receptionist', 'counter']), async (req, res) => {
     });
     await patient.save();
   } else {
-    // Optionally update patient details if they changed
+    // Update patient details if changed
     patient.name = req.body.patientName;
     patient.age = req.body.age;
     if (req.body.cnic) patient.cnic = req.body.cnic;
