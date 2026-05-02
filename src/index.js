@@ -19,7 +19,7 @@ const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'super-refresh-secret-key';
 
-// Socket.io setup (if used)
+// Socket.io setup
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] }
 });
@@ -71,7 +71,7 @@ const caseSchema = new mongoose.Schema(
     phone: String,
     cnic: String,
     doctorId: String,
-    patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient' }, // ✅ added
+    patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient' },
     doctorName: String,
     appointmentDate: String,
     appointmentTime: String,
@@ -160,7 +160,6 @@ const billSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ✅ Patient Master Index (only once)
 const patientSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
@@ -176,9 +175,28 @@ const patientSchema = new mongoose.Schema(
 patientSchema.index({ phone: 1 });
 patientSchema.index({ cnic: 1 });
 
-const Patient = mongoose.model('Patient', patientSchema);
+// PatientReport schema (if you have it – keep as is)
+const patientReportSchema = new mongoose.Schema(
+  {
+    patientName: { type: String, required: true },
+    phone: { type: String, required: true },
+    cnic: { type: String },
+    age: String,
+    gender: { type: String, enum: ['Male', 'Female', 'Other'], default: 'Male' },
+    doctorId: { type: String, required: true },
+    doctorName: { type: String, required: true },
+    diagnosis: { type: String, required: true },
+    prescriptions: [{ id: String, name: String, price: Number, quantity: Number }],
+    recommendedTests: [{ id: String, name: String, price: Number }],
+    reportDate: { type: Date, default: Date.now },
+    notes: String,
+  },
+  { timestamps: true }
+);
+patientReportSchema.index({ phone: 1, reportDate: -1 });
+patientReportSchema.index({ cnic: 1, reportDate: -1 });
 
-// Models
+// Models (only once each)
 const User = mongoose.model('User', userSchema);
 const DoctorRequest = mongoose.model('DoctorRequest', doctorRequestSchema);
 const Case = mongoose.model('Case', caseSchema);
@@ -186,6 +204,8 @@ const Appointment = mongoose.model('Appointment', appointmentSchema);
 const LabTest = mongoose.model('LabTest', labTestSchema);
 const Medicine = mongoose.model('Medicine', medicineSchema);
 const Bill = mongoose.model('Bill', billSchema);
+const Patient = mongoose.model('Patient', patientSchema);
+const PatientReport = mongoose.model('PatientReport', patientReportSchema);
 
 // ======================= INITIAL DATA =======================
 const baseUsers = [
@@ -247,12 +267,12 @@ function addTimelineEntry(caseDoc, actor, action, note = '') {
   });
 }
 
-// ======================= ROUTES =======================
+// ======================= HEALTH =======================
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', service: 'Clinic Management API', timestamp: new Date().toISOString() });
 });
 
-// Auth
+// ======================= AUTH =======================
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body;
   const user = await User.findOne({ username });
@@ -294,7 +314,7 @@ app.post('/api/auth/logout', auth(), async (req, res) => {
   res.json({ ok: true });
 });
 
-// Doctor requests
+// ======================= DOCTOR REQUESTS =======================
 app.post('/api/auth/doctor-request', async (req, res) => {
   const { fullName, specialization, preferredUsername, password, consultFee } = req.body;
   const passwordHash = await bcrypt.hash(password, 10);
@@ -336,7 +356,7 @@ app.delete('/api/admin/doctor-requests/:id', auth(['admin']), async (req, res) =
   res.json({ ok: true });
 });
 
-// Doctors
+// ======================= DOCTORS =======================
 app.get('/api/doctors', auth(), async (_req, res) => {
   const doctors = await User.find({ role: 'doctor' }).select('_id name specialization consultFee availability username');
   res.json(doctors);
@@ -401,10 +421,15 @@ app.put('/api/doctors/:id/availability', auth(['admin', 'doctor']), async (req, 
   res.json(doctor);
 });
 
-// Lab tests catalog
+// ======================= CATALOGS =======================
 app.get('/api/catalog/lab-tests', auth(), async (_req, res) => {
   const tests = await LabTest.find({ active: true }).sort({ name: 1 });
   res.json(tests);
+});
+
+app.get('/api/catalog/medicines', auth(), async (_req, res) => {
+  const medicines = await Medicine.find({ active: true }).sort({ name: 1 });
+  res.json(medicines);
 });
 
 app.post('/api/catalog/lab-tests', auth(['lab']), async (req, res) => {
@@ -413,12 +438,6 @@ app.post('/api/catalog/lab-tests', auth(['lab']), async (req, res) => {
   const io = req.app.get('io');
   io.emit('labtest:created', created);
   res.status(201).json(created);
-});
-
-// Medicines catalog
-app.get('/api/catalog/medicines', auth(), async (_req, res) => {
-  const medicines = await Medicine.find({ active: true }).sort({ name: 1 });
-  res.json(medicines);
 });
 
 app.post('/api/catalog/medicines', auth(['pharmacy', 'admin']), async (req, res) => {
@@ -471,7 +490,6 @@ app.delete('/api/medicines/:id', auth(['pharmacy', 'admin']), async (req, res) =
   res.json({ message: 'Medicine deleted successfully' });
 });
 
-// Bulk import medicines CSV
 const upload = multer({ storage: multer.memoryStorage() });
 app.post('/api/medicines/bulk', auth(['pharmacy', 'admin']), upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
@@ -502,7 +520,7 @@ app.post('/api/medicines/bulk', auth(['pharmacy', 'admin']), upload.single('file
     });
 });
 
-// Cases
+// ======================= CASES =======================
 app.get('/api/cases', auth(), async (req, res) => {
   const { doctorId, day, page = 1, limit = 20, search = '', sortBy = 'createdAt', order = 'desc' } = req.query;
   const query = {};
@@ -600,7 +618,7 @@ app.get('/api/cases/:id/timeline', auth(), async (req, res) => {
   res.json(caseDoc.timeline || []);
 });
 
-// Appointments
+// ======================= APPOINTMENTS =======================
 app.get('/api/appointments', auth(), async (req, res) => {
   const { doctorId, day } = req.query;
   const query = {};
@@ -611,7 +629,7 @@ app.get('/api/appointments', auth(), async (req, res) => {
   res.json(items);
 });
 
-// Bills
+// ======================= BILLS =======================
 app.post('/api/bills', auth(['receptionist', 'counter', 'admin', 'doctor']), async (req, res) => {
   const billData = req.body;
   const caseDoc = await Case.findById(billData.caseId);
@@ -682,7 +700,7 @@ app.get('/api/bills', auth(), async (req, res) => {
   }
 });
 
-// Patient Report (existing)
+// ======================= PATIENT REPORTS =======================
 app.get('/api/patient-reports', auth(['doctor', 'admin']), async (req, res) => {
   const { phone, cnic, patientId } = req.query;
   const query = {};
@@ -710,7 +728,7 @@ app.get('/api/patient-reports/:id', auth(['doctor', 'admin']), async (req, res) 
   res.json(report);
 });
 
-// =============== PATIENT HISTORY & SEARCH ===============
+// ======================= PATIENT HISTORY & SEARCH =======================
 app.get('/api/patients/:patientId/history', auth(['doctor', 'admin', 'receptionist']), async (req, res) => {
   const { patientId } = req.params;
   if (!mongoose.Types.ObjectId.isValid(patientId)) return res.status(400).json({ message: 'Invalid patient ID' });
@@ -733,7 +751,7 @@ app.get('/api/patients/search', auth(['receptionist', 'doctor', 'admin']), async
   res.json(patients);
 });
 
-// =============== MIGRATION: backfill patientId for old cases (run once) ===============
+// ======================= MIGRATION: backfill patientId for old cases =======================
 app.post('/api/migrate/backfill-patient-id', auth(['admin']), async (req, res) => {
   try {
     const cases = await Case.find({ patientId: { $exists: false } });
@@ -760,7 +778,7 @@ app.post('/api/migrate/backfill-patient-id', auth(['admin']), async (req, res) =
   }
 });
 
-// Start server
+// ======================= START SERVER =======================
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
