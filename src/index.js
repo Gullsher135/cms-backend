@@ -59,6 +59,7 @@ const caseSchema = new mongoose.Schema(
     phone: String,
     cnic: String,
     doctorId: String,
+    patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient' },
     doctorName: String,
     appointmentDate: String,
     appointmentTime: String,
@@ -147,6 +148,27 @@ const billSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+// Patient Master Index
+const patientSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    age: String,
+    phone: { type: String, required: true, unique: true },
+    cnic: String,
+    gender: { type: String, enum: ['Male', 'Female', 'Other'] },
+    address: String,
+    emergencyContact: String,
+    allergies: [{ type: String }],
+    medicalHistory: String, // free text or structured later
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { timestamps: true }
+);
+patientSchema.index({ phone: 1 });
+patientSchema.index({ cnic: 1 });
+
+const Patient = mongoose.model('Patient', patientSchema);
 
 const User = mongoose.model('User', userSchema);
 const DoctorRequest = mongoose.model('DoctorRequest', doctorRequestSchema);
@@ -495,18 +517,36 @@ app.post('/api/cases', auth(['receptionist', 'counter']), async (req, res) => {
   if (conflict) {
     return res.status(409).json({ message: 'Selected doctor slot is already booked' });
   }
+
+  // Find or create patient master record
+  let patient = await Patient.findOne({ phone: req.body.phone });
+  if (!patient) {
+    patient = new Patient({
+      name: req.body.patientName,
+      age: req.body.age,
+      phone: req.body.phone,
+      cnic: req.body.cnic || '',
+    });
+    await patient.save();
+  } else {
+    // Optionally update patient details if they changed
+    patient.name = req.body.patientName;
+    patient.age = req.body.age;
+    if (req.body.cnic) patient.cnic = req.body.cnic;
+    await patient.save();
+  }
+
   const caseData = await Case.create({
     ...req.body,
+    patientId: patient._id,
     status: 'doctor',
-    timeline: [
-      {
-        at: new Date().toISOString(),
-        by: req.user.name,
-        actorRole: req.user.role,
-        action: 'Case created at reception/counter',
-        note: `Appointment booked with Dr. ${req.body.doctorName}`,
-      },
-    ],
+    timeline: [{
+      at: new Date().toISOString(),
+      by: req.user.name,
+      actorRole: req.user.role,
+      action: 'Case created at reception/counter',
+      note: `Appointment booked with Dr. ${req.body.doctorName}`,
+    }],
   });
   const appointment = await Appointment.create({
     caseId: caseData._id.toString(),
@@ -520,6 +560,9 @@ app.post('/api/cases', auth(['receptionist', 'counter']), async (req, res) => {
   });
   caseData.appointmentId = appointment._id.toString();
   await caseData.save();
+
+  const io = req.app.get('io');
+  io.emit('case:created', caseData);
   res.status(201).json(caseData);
 });
 
@@ -657,6 +700,29 @@ app.delete('/api/medicines/:id', auth(['pharmacy', 'admin']), async (req, res) =
   if (!medicine) return res.status(404).json({ message: 'Medicine not found' });
   res.json({ message: 'Medicine deleted successfully' });
 });
+
+// GET /api/patients/:patientId/history
+app.get('/api/patients/:patientId/history', auth(['doctor', 'admin', 'receptionist']), async (req, res) => {
+  const { patientId } = req.params;
+  const patient = await Patient.findById(patientId);
+  if (!patient) return res.status(404).json({ message: 'Patient not found' });
+  
+  const cases = await Case.find({ patientId }).sort({ createdAt: -1 });
+  res.json({ patient, cases });
+});
+app.get('/api/patients/search', auth(['receptionist', 'doctor', 'admin']), async (req, res) => {
+  const { q } = req.query;
+  if (!q) return res.status(400).json({ message: 'Search query required' });
+  const patients = await Patient.find({
+    $or: [
+      { name: { $regex: q, $options: 'i' } },
+      { phone: { $regex: q, $options: 'i' } },
+      { cnic: { $regex: q, $options: 'i' } },
+    ]
+  }).limit(20);
+  res.json(patients);
+});
+
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
