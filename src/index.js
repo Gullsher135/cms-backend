@@ -160,7 +160,7 @@ const billSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Enhanced Patient Schema with full EHR fields
+// Patient master record with full EHR fields
 const patientSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
@@ -170,8 +170,8 @@ const patientSchema = new mongoose.Schema(
     gender: { type: String, enum: ['Male', 'Female', 'Other'] },
     address: String,
     emergencyContact: String,
-    // EHR fields
-    allergies: [{ type: String }],
+    // EHR features
+    allergies: [{ type: String }],  // e.g., "Penicillin", "Peanuts"
     problemList: [{
       problem: String,
       diagnosedDate: Date,
@@ -191,8 +191,8 @@ const patientSchema = new mongoose.Schema(
       bpDiastolic: Number,
       pulse: Number,
       temperature: Number,
-      weight: Number,
-      height: Number,
+      weight: Number,  // kg
+      height: Number,  // cm
       bmi: Number,
       notes: String
     }],
@@ -213,6 +213,7 @@ const patientSchema = new mongoose.Schema(
 patientSchema.index({ phone: 1 });
 patientSchema.index({ cnic: 1 });
 
+// PatientReport schema (existing)
 const patientReportSchema = new mongoose.Schema(
   {
     patientName: { type: String, required: true },
@@ -765,9 +766,8 @@ app.get('/api/patient-reports/:id', auth(['doctor', 'admin']), async (req, res) 
   res.json(report);
 });
 
-// ======================= PATIENT EHR MANAGEMENT =======================
-
-// Get full patient record (with all EHR fields)
+// ======================= PATIENT EHR DATA MANAGEMENT =======================
+// Get full patient data (including all EHR fields)
 app.get('/api/patients/:id', auth(['doctor', 'admin', 'receptionist']), async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid patient ID' });
@@ -782,10 +782,12 @@ app.put('/api/patients/:id', auth(['doctor', 'admin']), async (req, res) => {
   if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ message: 'Invalid patient ID' });
   const patient = await Patient.findByIdAndUpdate(id, req.body, { new: true, runValidators: true });
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
+  const io = req.app.get('io');
+  io.emit('patient:updated', patient);
   res.json(patient);
 });
 
-// Allergies
+// ----- Allergies -----
 app.post('/api/patients/:id/allergies', auth(['doctor', 'admin']), async (req, res) => {
   const { id } = req.params;
   const { allergy } = req.body;
@@ -796,6 +798,8 @@ app.post('/api/patients/:id/allergies', auth(['doctor', 'admin']), async (req, r
     { new: true }
   );
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
+  const io = req.app.get('io');
+  io.emit('patient:updated', patient);
   res.json(patient.allergies);
 });
 
@@ -809,147 +813,113 @@ app.delete('/api/patients/:id/allergies', auth(['doctor', 'admin']), async (req,
     { new: true }
   );
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
+  const io = req.app.get('io');
+  io.emit('patient:updated', patient);
   res.json(patient.allergies);
 });
 
-// Problem List
+// ----- Problem List -----
 app.post('/api/patients/:id/problems', auth(['doctor', 'admin']), async (req, res) => {
   const { id } = req.params;
   const { problem, diagnosedDate, status, notes } = req.body;
   if (!problem) return res.status(400).json({ message: 'Problem text required' });
   const patient = await Patient.findByIdAndUpdate(
     id,
-    { $push: { problemList: { problem, diagnosedDate: diagnosedDate || new Date(), status: status || 'active', notes } } },
+    { $push: { problemList: { problem, diagnosedDate, status, notes } } },
     { new: true }
   );
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
+  const io = req.app.get('io');
+  io.emit('patient:updated', patient);
   res.json(patient.problemList);
 });
 
-app.put('/api/patients/:id/problems/:problemId', auth(['doctor', 'admin']), async (req, res) => {
-  const { id, problemId } = req.params;
-  if (!mongoose.Types.ObjectId.isValid(problemId)) return res.status(400).json({ message: 'Invalid problem ID' });
+app.put('/api/patients/:id/problems/:problemIndex', auth(['doctor', 'admin']), async (req, res) => {
+  const { id, problemIndex } = req.params;
+  const { problem, diagnosedDate, status, notes } = req.body;
   const patient = await Patient.findById(id);
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
-  const problemIndex = patient.problemList.findIndex(p => p._id.toString() === problemId);
-  if (problemIndex === -1) return res.status(404).json({ message: 'Problem not found' });
-  Object.assign(patient.problemList[problemIndex], req.body);
-  await patient.save();
-  res.json(patient.problemList);
+  if (patient.problemList[problemIndex]) {
+    if (problem !== undefined) patient.problemList[problemIndex].problem = problem;
+    if (diagnosedDate !== undefined) patient.problemList[problemIndex].diagnosedDate = diagnosedDate;
+    if (status !== undefined) patient.problemList[problemIndex].status = status;
+    if (notes !== undefined) patient.problemList[problemIndex].notes = notes;
+    await patient.save();
+    const io = req.app.get('io');
+    io.emit('patient:updated', patient);
+    res.json(patient.problemList);
+  } else {
+    res.status(404).json({ message: 'Problem not found' });
+  }
 });
 
-app.delete('/api/patients/:id/problems/:problemId', auth(['doctor', 'admin']), async (req, res) => {
-  const { id, problemId } = req.params;
-  const patient = await Patient.findByIdAndUpdate(
-    id,
-    { $pull: { problemList: { _id: problemId } } },
-    { new: true }
-  );
+app.delete('/api/patients/:id/problems/:problemIndex', auth(['doctor', 'admin']), async (req, res) => {
+  const { id, problemIndex } = req.params;
+  const patient = await Patient.findById(id);
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
+  patient.problemList.splice(problemIndex, 1);
+  await patient.save();
+  const io = req.app.get('io');
+  io.emit('patient:updated', patient);
   res.json(patient.problemList);
 });
 
-// Immunizations
+// ----- Immunizations -----
 app.post('/api/patients/:id/immunizations', auth(['doctor', 'admin']), async (req, res) => {
   const { id } = req.params;
   const { name, date, provider, nextDue, lotNumber } = req.body;
-  if (!name || !date) return res.status(400).json({ message: 'Name and date required' });
+  if (!name) return res.status(400).json({ message: 'Immunization name required' });
   const patient = await Patient.findByIdAndUpdate(
     id,
-    { $push: { immunizations: { name, date: new Date(date), provider, nextDue: nextDue ? new Date(nextDue) : null, lotNumber } } },
+    { $push: { immunizations: { name, date, provider, nextDue, lotNumber } } },
     { new: true }
   );
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
+  const io = req.app.get('io');
+  io.emit('patient:updated', patient);
   res.json(patient.immunizations);
 });
 
-app.put('/api/patients/:id/immunizations/:immId', auth(['doctor', 'admin']), async (req, res) => {
-  const { id, immId } = req.params;
+app.delete('/api/patients/:id/immunizations/:immIndex', auth(['doctor', 'admin']), async (req, res) => {
+  const { id, immIndex } = req.params;
   const patient = await Patient.findById(id);
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
-  const immIndex = patient.immunizations.findIndex(i => i._id.toString() === immId);
-  if (immIndex === -1) return res.status(404).json({ message: 'Immunization not found' });
-  Object.assign(patient.immunizations[immIndex], req.body);
-  if (req.body.date) patient.immunizations[immIndex].date = new Date(req.body.date);
-  if (req.body.nextDue) patient.immunizations[immIndex].nextDue = new Date(req.body.nextDue);
+  patient.immunizations.splice(immIndex, 1);
   await patient.save();
+  const io = req.app.get('io');
+  io.emit('patient:updated', patient);
   res.json(patient.immunizations);
 });
 
-app.delete('/api/patients/:id/immunizations/:immId', auth(['doctor', 'admin']), async (req, res) => {
-  const { id, immId } = req.params;
-  const patient = await Patient.findByIdAndUpdate(
-    id,
-    { $pull: { immunizations: { _id: immId } } },
-    { new: true }
-  );
-  if (!patient) return res.status(404).json({ message: 'Patient not found' });
-  res.json(patient.immunizations);
-});
-
-// Vitals
+// ----- Vitals -----
 app.post('/api/patients/:id/vitals', auth(['doctor', 'admin']), async (req, res) => {
   const { id } = req.params;
   const { bpSystolic, bpDiastolic, pulse, temperature, weight, height, notes } = req.body;
   let bmi = null;
-  if (weight && height && height > 0) {
-    bmi = weight / ((height / 100) ** 2);
-  }
+  if (weight && height) bmi = (weight / ((height/100)*(height/100))).toFixed(1);
   const patient = await Patient.findByIdAndUpdate(
     id,
-    { $push: { vitals: { date: new Date(), bpSystolic, bpDiastolic, pulse, temperature, weight, height, bmi, notes } } },
+    { $push: { vitals: { bpSystolic, bpDiastolic, pulse, temperature, weight, height, bmi, notes, date: new Date() } } },
     { new: true }
   );
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
+  const io = req.app.get('io');
+  io.emit('patient:updated', patient);
   res.json(patient.vitals);
 });
 
-app.delete('/api/patients/:id/vitals/:vitalId', auth(['doctor', 'admin']), async (req, res) => {
-  const { id, vitalId } = req.params;
-  const patient = await Patient.findByIdAndUpdate(
-    id,
-    { $pull: { vitals: { _id: vitalId } } },
-    { new: true }
-  );
-  if (!patient) return res.status(404).json({ message: 'Patient not found' });
-  res.json(patient.vitals);
-});
-
-// Clinical Notes (SOAP)
-app.post('/api/patients/:id/notes', auth(['doctor', 'admin']), async (req, res) => {
+// ----- Clinical Notes (SOAP) -----
+app.post('/api/patients/:id/clinical-notes', auth(['doctor', 'admin']), async (req, res) => {
   const { id } = req.params;
   const { type, subjective, objective, assessment, plan } = req.body;
-  if (!subjective && !objective && !assessment && !plan) {
-    return res.status(400).json({ message: 'At least one field is required' });
-  }
   const patient = await Patient.findByIdAndUpdate(
     id,
-    { $push: { clinicalNotes: { date: new Date(), type: type || 'SOAP', subjective, objective, assessment, plan, doctorId: req.user.id, doctorName: req.user.name } } },
+    { $push: { clinicalNotes: { type, subjective, objective, assessment, plan, doctorId: req.user.id, doctorName: req.user.name, date: new Date() } } },
     { new: true }
   );
   if (!patient) return res.status(404).json({ message: 'Patient not found' });
-  res.json(patient.clinicalNotes);
-});
-
-app.put('/api/patients/:id/notes/:noteId', auth(['doctor', 'admin']), async (req, res) => {
-  const { id, noteId } = req.params;
-  const patient = await Patient.findById(id);
-  if (!patient) return res.status(404).json({ message: 'Patient not found' });
-  const noteIndex = patient.clinicalNotes.findIndex(n => n._id.toString() === noteId);
-  if (noteIndex === -1) return res.status(404).json({ message: 'Note not found' });
-  Object.assign(patient.clinicalNotes[noteIndex], req.body);
-  await patient.save();
-  res.json(patient.clinicalNotes);
-});
-
-app.delete('/api/patients/:id/notes/:noteId', auth(['doctor', 'admin']), async (req, res) => {
-  const { id, noteId } = req.params;
-  const patient = await Patient.findByIdAndUpdate(
-    id,
-    { $pull: { clinicalNotes: { _id: noteId } } },
-    { new: true }
-  );
-  if (!patient) return res.status(404).json({ message: 'Patient not found' });
+  const io = req.app.get('io');
+  io.emit('patient:updated', patient);
   res.json(patient.clinicalNotes);
 });
 
@@ -976,7 +946,7 @@ app.get('/api/patients/search', auth(['receptionist', 'doctor', 'admin']), async
   res.json(patients);
 });
 
-// ======================= MIGRATION =======================
+// ======================= MIGRATION: backfill patientId for old cases =======================
 app.post('/api/migrate/backfill-patient-id', auth(['admin']), async (req, res) => {
   try {
     const cases = await Case.find({ patientId: { $exists: false } });
