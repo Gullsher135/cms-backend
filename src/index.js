@@ -18,6 +18,7 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'super-refresh-secret-key';
+const SOFTWARE_BRANDING = 'Powered by Nexone Clinic CMS';
 
 // Socket.io setup
 const io = new Server(server, {
@@ -260,6 +261,64 @@ const patientReportSchema = new mongoose.Schema(
 patientReportSchema.index({ phone: 1, reportDate: -1 });
 patientReportSchema.index({ cnic: 1, reportDate: -1 });
 
+const limsTestTypeSchema = new mongoose.Schema(
+  {
+    mainTestName: { type: String, required: true, unique: true },
+    testPrice: { type: Number, required: true, default: 0 },
+    testTemplate: {
+      type: String,
+      enum: ['simple report', 'detailed report', 'physical report'],
+      default: 'detailed report',
+    },
+    testCategory: { type: String, required: true },
+    subTests: [
+      {
+        subTestName: { type: String, required: true },
+        testNormalRanges: { type: String, default: '' },
+        testUnit: { type: String, default: '' },
+        examType: { type: String, default: 'general' },
+      },
+    ],
+    active: { type: Boolean, default: true },
+    addedBy: { type: String, default: '' },
+  },
+  { timestamps: true }
+);
+
+const limsPatientSchema = new mongoose.Schema(
+  {
+    patientName: { type: String, required: true },
+    patientAge: { type: Number, required: true },
+    gender: { type: String, default: '' },
+    phoneNumber: { type: String, required: true },
+    testRequired: { type: String, default: '' },
+    referredBy: { type: String, default: '' },
+    tests: [
+      {
+        testTypeId: String,
+        mainTestName: String,
+        testCategory: String,
+        testPrice: Number,
+        testTemplate: String,
+        subTests: [
+          {
+            subTestName: String,
+            testNormalRanges: String,
+            testUnit: String,
+            examType: String,
+            result: { type: String, default: '' },
+          },
+        ],
+      },
+    ],
+    remarks: { type: String, default: '' },
+    reportReady: { type: Boolean, default: false },
+    reportedAt: Date,
+    reportedBy: String,
+  },
+  { timestamps: true }
+);
+
 // Models
 const User = mongoose.model('User', userSchema);
 const DoctorRequest = mongoose.model('DoctorRequest', doctorRequestSchema);
@@ -270,6 +329,8 @@ const Medicine = mongoose.model('Medicine', medicineSchema);
 const Bill = mongoose.model('Bill', billSchema);
 const Patient = mongoose.model('Patient', patientSchema);
 const PatientReport = mongoose.model('PatientReport', patientReportSchema);
+const LimsTestType = mongoose.model('LimsTestType', limsTestTypeSchema);
+const LimsPatient = mongoose.model('LimsPatient', limsPatientSchema);
 
 // ======================= INITIAL DATA =======================
 const baseUsers = [
@@ -1168,6 +1229,220 @@ app.get('/api/lab-results/:resultId/print', auth(['lab', 'doctor']), async (req,
     <div class="footer">${SOFTWARE_BRANDING}</div>
   </body>
   </html>`;
+  res.send(html);
+});
+
+// ======================= MADINA-STYLE LIMS =======================
+app.get('/api/lims/test-types', auth(['lab', 'admin', 'doctor', 'receptionist']), async (_req, res) => {
+  const tests = await LimsTestType.find({ active: true }).sort({ createdAt: -1 });
+  res.json(tests);
+});
+
+app.post('/api/lims/test-types', auth(['lab', 'admin']), async (req, res) => {
+  const { mainTestName, testPrice, testTemplate, testCategory, subTests } = req.body;
+  if (!mainTestName || !testCategory) {
+    return res.status(400).json({ message: 'mainTestName and testCategory are required' });
+  }
+  const cleanSubTests = (Array.isArray(subTests) ? subTests : [])
+    .filter((s) => s?.subTestName)
+    .map((s) => ({
+      subTestName: String(s.subTestName).trim(),
+      testNormalRanges: s.testNormalRanges || '',
+      testUnit: s.testUnit || '',
+      examType: s.examType || 'general',
+    }));
+  const created = await LimsTestType.create({
+    mainTestName: String(mainTestName).trim(),
+    testPrice: Number(testPrice || 0),
+    testTemplate: testTemplate || 'detailed report',
+    testCategory: String(testCategory).trim(),
+    subTests: cleanSubTests,
+    addedBy: req.user.name,
+  });
+  res.status(201).json(created);
+});
+
+app.put('/api/lims/test-types/:id', auth(['lab', 'admin']), async (req, res) => {
+  const { mainTestName, testPrice, testTemplate, testCategory, subTests } = req.body;
+  const cleanSubTests = (Array.isArray(subTests) ? subTests : [])
+    .filter((s) => s?.subTestName)
+    .map((s) => ({
+      subTestName: String(s.subTestName).trim(),
+      testNormalRanges: s.testNormalRanges || '',
+      testUnit: s.testUnit || '',
+      examType: s.examType || 'general',
+    }));
+  const updated = await LimsTestType.findByIdAndUpdate(
+    req.params.id,
+    {
+      ...(mainTestName !== undefined ? { mainTestName: String(mainTestName).trim() } : {}),
+      ...(testPrice !== undefined ? { testPrice: Number(testPrice || 0) } : {}),
+      ...(testTemplate !== undefined ? { testTemplate } : {}),
+      ...(testCategory !== undefined ? { testCategory: String(testCategory).trim() } : {}),
+      ...(subTests !== undefined ? { subTests: cleanSubTests } : {}),
+    },
+    { new: true, runValidators: true }
+  );
+  if (!updated) return res.status(404).json({ message: 'Test type not found' });
+  res.json(updated);
+});
+
+app.delete('/api/lims/test-types/:id', auth(['lab', 'admin']), async (req, res) => {
+  const inUse = await LimsPatient.exists({ 'tests.testTypeId': req.params.id });
+  if (inUse) {
+    return res.status(409).json({ message: 'Cannot delete test type already used in patient reports' });
+  }
+  const deleted = await LimsTestType.findByIdAndDelete(req.params.id);
+  if (!deleted) return res.status(404).json({ message: 'Test type not found' });
+  res.json({ ok: true });
+});
+
+app.get('/api/lims/patients', auth(['lab', 'admin', 'doctor', 'receptionist']), async (req, res) => {
+  const { search = '', page = 1, limit = 20 } = req.query;
+  const query = {};
+  if (search) {
+    query.$or = [
+      { patientName: { $regex: search, $options: 'i' } },
+      { phoneNumber: { $regex: search, $options: 'i' } },
+    ];
+  }
+  const skip = (Number(page) - 1) * Number(limit);
+  const [data, total] = await Promise.all([
+    LimsPatient.find(query).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+    LimsPatient.countDocuments(query),
+  ]);
+  res.json({ data, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) });
+});
+
+app.post('/api/lims/patients', auth(['lab', 'admin', 'receptionist']), async (req, res) => {
+  const {
+    patientName,
+    patientAge,
+    gender,
+    phoneNumber,
+    testRequired,
+    referredBy,
+    testTypeIds = [],
+  } = req.body;
+
+  if (!patientName || !phoneNumber || !Array.isArray(testTypeIds) || !testTypeIds.length) {
+    return res.status(400).json({ message: 'patientName, phoneNumber and at least one test type are required' });
+  }
+  const selectedTypes = await LimsTestType.find({ _id: { $in: testTypeIds }, active: true });
+  if (!selectedTypes.length) return res.status(400).json({ message: 'No valid test types selected' });
+  const tests = selectedTypes.map((t) => ({
+    testTypeId: t._id.toString(),
+    mainTestName: t.mainTestName,
+    testCategory: t.testCategory,
+    testPrice: t.testPrice,
+    testTemplate: t.testTemplate,
+    subTests: (t.subTests || []).map((s) => ({
+      subTestName: s.subTestName,
+      testNormalRanges: s.testNormalRanges || '',
+      testUnit: s.testUnit || '',
+      examType: s.examType || 'general',
+      result: '',
+    })),
+  }));
+  const created = await LimsPatient.create({
+    patientName,
+    patientAge: Number(patientAge || 0),
+    gender: gender || '',
+    phoneNumber,
+    testRequired: testRequired || '',
+    referredBy: referredBy || '',
+    tests,
+    reportReady: false,
+  });
+  res.status(201).json(created);
+});
+
+app.get('/api/lims/patients/:id', auth(['lab', 'admin', 'doctor', 'receptionist']), async (req, res) => {
+  const patient = await LimsPatient.findById(req.params.id);
+  if (!patient) return res.status(404).json({ message: 'LIMS patient not found' });
+  res.json(patient);
+});
+
+app.put('/api/lims/patients/:id', auth(['lab', 'admin', 'receptionist']), async (req, res) => {
+  const { patientName, patientAge, gender, phoneNumber, testRequired, referredBy } = req.body;
+  const updated = await LimsPatient.findByIdAndUpdate(
+    req.params.id,
+    {
+      ...(patientName !== undefined ? { patientName } : {}),
+      ...(patientAge !== undefined ? { patientAge: Number(patientAge || 0) } : {}),
+      ...(gender !== undefined ? { gender } : {}),
+      ...(phoneNumber !== undefined ? { phoneNumber } : {}),
+      ...(testRequired !== undefined ? { testRequired } : {}),
+      ...(referredBy !== undefined ? { referredBy } : {}),
+    },
+    { new: true, runValidators: true }
+  );
+  if (!updated) return res.status(404).json({ message: 'LIMS patient not found' });
+  res.json(updated);
+});
+
+app.delete('/api/lims/patients/:id', auth(['lab', 'admin']), async (req, res) => {
+  const deleted = await LimsPatient.findByIdAndDelete(req.params.id);
+  if (!deleted) return res.status(404).json({ message: 'LIMS patient not found' });
+  res.json({ ok: true });
+});
+
+app.put('/api/lims/patients/:id/results', auth(['lab', 'admin']), async (req, res) => {
+  const { tests = [], remarks = '' } = req.body;
+  const patient = await LimsPatient.findById(req.params.id);
+  if (!patient) return res.status(404).json({ message: 'LIMS patient not found' });
+  patient.tests = Array.isArray(tests) ? tests : patient.tests;
+  patient.remarks = remarks || '';
+  patient.reportReady = true;
+  patient.reportedAt = new Date();
+  patient.reportedBy = req.user.name;
+  await patient.save();
+  res.json(patient);
+});
+
+app.get('/api/lims/patients/:id/print', auth(['lab', 'admin', 'doctor']), async (req, res) => {
+  const patient = await LimsPatient.findById(req.params.id);
+  if (!patient) return res.status(404).json({ message: 'LIMS patient not found' });
+  const rows = (patient.tests || [])
+    .map((test) => {
+      const subRows = (test.subTests || [])
+        .map(
+          (sub) => `<tr>
+          <td>${sub.subTestName || ''}</td>
+          <td>${sub.result || ''}</td>
+          <td>${sub.testUnit || ''}</td>
+          <td>${sub.testNormalRanges || ''}</td>
+        </tr>`
+        )
+        .join('');
+      return `<h3>${test.mainTestName}</h3><table><thead><tr><th>Test</th><th>Result</th><th>Unit</th><th>Normal Range</th></tr></thead><tbody>${subRows}</tbody></table>`;
+    })
+    .join('');
+  const html = `<!DOCTYPE html><html><head><title>LIMS Report</title>
+  <style>
+  body { font-family: Arial, sans-serif; margin: 18px; color: #111; }
+  h1,h2,h3 { margin: 0; }
+  .header { border-bottom: 2px solid #0f5ea8; padding-bottom: 8px; margin-bottom: 12px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0 14px; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; }
+  th, td { border: 1px solid #d0d7de; padding: 7px; font-size: 13px; }
+  th { background: #f1f5f9; text-align: left; }
+  .remarks { margin-top: 10px; padding: 8px; border: 1px solid #d0d7de; border-radius: 6px; }
+  .footer { margin-top: 20px; font-size: 11px; color: #6b7280; text-align: center; border-top: 1px solid #ddd; padding-top: 8px; }
+  </style></head><body>
+  <div class="header"><h2>Al-MADINA LABORATORY</h2><p>Laboratory Report</p></div>
+  <div class="grid">
+    <div><strong>Patient Name:</strong> ${patient.patientName}</div>
+    <div><strong>Patient ID:</strong> ${patient._id}</div>
+    <div><strong>Age/Gender:</strong> ${patient.patientAge} / ${patient.gender || '-'}</div>
+    <div><strong>Date:</strong> ${new Date(patient.reportedAt || patient.updatedAt).toLocaleString()}</div>
+    <div><strong>Referred By:</strong> ${patient.referredBy || '-'}</div>
+    <div><strong>Investigations:</strong> ${(patient.tests || []).map((t) => t.mainTestName).join(', ')}</div>
+  </div>
+  ${rows}
+  ${patient.remarks ? `<div class="remarks"><strong>Remarks:</strong><br/>${patient.remarks}</div>` : ''}
+  <div class="footer">${SOFTWARE_BRANDING}</div>
+  </body></html>`;
   res.send(html);
 });
 
