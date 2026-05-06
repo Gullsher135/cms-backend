@@ -287,6 +287,7 @@ const limsTestTypeSchema = new mongoose.Schema(
 
 const limsPatientSchema = new mongoose.Schema(
   {
+    patientId: { type: mongoose.Schema.Types.ObjectId, ref: 'Patient', default: null },
     patientName: { type: String, required: true },
     patientAge: { type: Number, required: true },
     gender: { type: String, default: '' },
@@ -1304,11 +1305,16 @@ app.get('/api/lims/patients', auth(['lab', 'admin', 'doctor', 'receptionist']), 
     query.$or = [
       { patientName: { $regex: search, $options: 'i' } },
       { phoneNumber: { $regex: search, $options: 'i' } },
+      { referredBy: { $regex: search, $options: 'i' } },
     ];
   }
   const skip = (Number(page) - 1) * Number(limit);
   const [data, total] = await Promise.all([
-    LimsPatient.find(query).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+    LimsPatient.find(query)
+      .populate('patientId', 'name phone cnic gender age')
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit)),
     LimsPatient.countDocuments(query),
   ]);
   res.json({ data, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) });
@@ -1316,6 +1322,7 @@ app.get('/api/lims/patients', auth(['lab', 'admin', 'doctor', 'receptionist']), 
 
 app.post('/api/lims/patients', auth(['lab', 'admin', 'receptionist']), async (req, res) => {
   const {
+    patientId,
     patientName,
     patientAge,
     gender,
@@ -1328,6 +1335,30 @@ app.post('/api/lims/patients', auth(['lab', 'admin', 'receptionist']), async (re
   if (!patientName || !phoneNumber || !Array.isArray(testTypeIds) || !testTypeIds.length) {
     return res.status(400).json({ message: 'patientName, phoneNumber and at least one test type are required' });
   }
+
+  let linkedPatient = null;
+  if (patientId && mongoose.Types.ObjectId.isValid(patientId)) {
+    linkedPatient = await Patient.findById(patientId);
+  }
+  if (!linkedPatient) {
+    linkedPatient = await Patient.findOne({ phone: phoneNumber });
+  }
+  if (!linkedPatient) {
+    linkedPatient = await Patient.create({
+      name: patientName,
+      age: String(patientAge || ''),
+      phone: phoneNumber,
+      cnic: '',
+      gender: gender || '',
+    });
+  } else {
+    linkedPatient.name = patientName;
+    linkedPatient.age = String(patientAge || linkedPatient.age || '');
+    linkedPatient.gender = gender || linkedPatient.gender || '';
+    if (!linkedPatient.cnic) linkedPatient.cnic = linkedPatient.cnic || '';
+    await linkedPatient.save();
+  }
+
   const selectedTypes = await LimsTestType.find({ _id: { $in: testTypeIds }, active: true });
   if (!selectedTypes.length) return res.status(400).json({ message: 'No valid test types selected' });
   const tests = selectedTypes.map((t) => ({
@@ -1344,7 +1375,9 @@ app.post('/api/lims/patients', auth(['lab', 'admin', 'receptionist']), async (re
       result: '',
     })),
   }));
+
   const created = await LimsPatient.create({
+    patientId: linkedPatient._id,
     patientName,
     patientAge: Number(patientAge || 0),
     gender: gender || '',
@@ -1358,7 +1391,7 @@ app.post('/api/lims/patients', auth(['lab', 'admin', 'receptionist']), async (re
 });
 
 app.get('/api/lims/patients/:id', auth(['lab', 'admin', 'doctor', 'receptionist']), async (req, res) => {
-  const patient = await LimsPatient.findById(req.params.id);
+  const patient = await LimsPatient.findById(req.params.id).populate('patientId', 'name phone cnic gender age');
   if (!patient) return res.status(404).json({ message: 'LIMS patient not found' });
   res.json(patient);
 });
