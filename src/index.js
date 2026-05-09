@@ -35,10 +35,12 @@ app.use(cors());
 app.use(express.json());
 
 const defaultMongoUri = 'mongodb://127.0.0.1:27017/najam-hospital';
+const mongoUri = process.env.MONGO_URI || defaultMongoUri;
+const mongoDbName = mongoUri.split('/').pop().split('?')[0] || 'test';
 
 mongoose
-  .connect(process.env.MONGO_URI || defaultMongoUri)
-  .then(() => console.log('MongoDB connected'))
+  .connect(mongoUri)
+  .then(() => console.log(`MongoDB connected to database: ${mongoDbName}`))
   .catch((err) => console.error('MongoDB connection failed:', err.message));
 
 // ======================= SCHEMAS =======================
